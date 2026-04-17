@@ -1,5 +1,7 @@
 # pgbam
 
+> **Development status:** `pgbam` is still under active development and should not be used yet for production or relied on for stable results.
+
 pgbam bridges pangenome graph alignments and the BAM ecosystem. Given a set of reads aligned to a pangenome graph (GAF format) and a haplotype index (GBWT or GBZ), it annotates each read in the BAM file with the haplotype paths it traverses and writes a compact sidecar file that maps those annotations back to named samples and haplotypes.
 
 The typical workflow is:
