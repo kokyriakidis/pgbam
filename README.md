@@ -101,6 +101,7 @@ pgbam annotate
   | --gbwt  <graph.gbwt> )
   [ --r-index  <graph.ri> ]
   [ --threads  <N> ]
+  [ --primary-only ]
 ```
 
 | Flag | Required | Description |
@@ -113,20 +114,44 @@ pgbam annotate
 | `--gbwt` | one of | GBWT graph index |
 | `--r-index` | no | R-index (`.ri`) for the GBWT — enables faster locate queries; build with `gbwt` tools |
 | `--threads` | no | Worker threads (default: 1) |
+| `--primary-only` | no | Use only the first GAF alignment in each `qname` block; annotate every BAM record with that `qname` from that primary alignment's set |
 
 The r-index accelerates the locate step — recovering which haplotype paths pass through each aligned subpath. For large cohorts or deeply sequenced samples, supplying it meaningfully reduces runtime.
+
+**Input requirements:**
+
+- `pgbam annotate` requires both BAM and GAF to be non-decreasing by `qname`.
+- Sort BAM by query name with `samtools sort -n -o reads.qname.bam reads.bam`.
+- Sort GAF by `qname` and then decreasing MAPQ with `sort -k1,1 -k12,12nr reads.gaf > reads.qname.mapq.gaf`.
+- This ordering is recommended in general and is required for `--primary-only`, because `pgbam` uses the first GAF alignment in each `qname` block as the primary one.
+- Sorting by `qname` groups identical names together, but it does not create a reliable per-record order within a duplicate-name block.
+- By default, `pgbam` aggregates all GAF alignments in a `qname` block, combines their graph matches, and applies the same aggregated annotation to every BAM record in the matching `qname` block.
+- With `--primary-only`, `pgbam` uses only the first GAF alignment in each `qname` block and applies that annotation to every BAM record in the matching `qname` block.
+- If your pipeline needs one-to-one pairing between multiple BAM records and multiple GAF records with the same read name, `qname` alone is not a sufficient join key.
 
 **Example:**
 
 ```bash
 pgbam annotate \
-    --bam      reads.bam \
-    --gaf      reads.gaf \
+    --bam      reads.qname.bam \
+    --gaf      reads.qname.mapq.gaf \
     --gbz      hprc.gbz \
     --out-bam  reads.annotated.bam \
     --out-sets reads.pgbam \
     --r-index  hprc.ri \
     --threads  8
+```
+
+Primary-only example:
+
+```bash
+pgbam annotate \
+    --bam          reads.qname.bam \
+    --gaf          reads.qname.mapq.gaf \
+    --gbz          hprc.gbz \
+    --out-bam      reads.annotated.bam \
+    --out-sets     reads.pgbam \
+    --primary-only
 ```
 
 **BAM tags written to each read:**

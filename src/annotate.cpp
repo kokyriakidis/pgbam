@@ -1,6 +1,7 @@
 #include "pgbam/bam_io.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -8,11 +9,11 @@
 #include <map>
 #include <memory>
 #include <mutex>
-#include <atomic>
+#include <optional>
 #include <sstream>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 #include <htslib/hts.h>
@@ -27,6 +28,9 @@
 namespace pgbam {
 namespace {
 
+using SamFilePtr = std::unique_ptr<samFile, decltype(&hts_close)>;
+using SamHeaderPtr = std::unique_ptr<sam_hdr_t, decltype(&sam_hdr_destroy)>;
+
 struct VectorHash {
   std::size_t operator()(const std::vector<std::uint64_t>& values) const noexcept {
     std::size_t seed = 0;
@@ -39,13 +43,13 @@ struct VectorHash {
 
 struct WorkItem {
   std::size_t ordinal = 0;
-  bam1_t* record = nullptr;
-  const std::vector<OrientedNode>* walk = nullptr;
+  std::vector<bam1_t*> records;
+  std::vector<std::vector<OrientedNode>> walks;
 };
 
 struct ResultItem {
   std::size_t ordinal = 0;
-  bam1_t* record = nullptr;
+  std::vector<bam1_t*> records;
   std::vector<SubpathResult> subpaths;
 };
 
@@ -69,17 +73,82 @@ private:
   bam1_t* record_ = nullptr;
 };
 
+class SidecarInterner {
+public:
+  explicit SidecarInterner(SidecarWriter& writer) : writer_(writer) {}
+
+  std::uint32_t intern(const std::vector<std::uint64_t>& thread_ids) {
+    auto found = set_to_id_.find(thread_ids);
+    if (found != set_to_id_.end()) {
+      return found->second;
+    }
+
+    const std::uint32_t assigned = next_set_id_++;
+    set_to_id_.emplace(thread_ids, assigned);
+    writer_.write_set(SidecarSetRecord{assigned, thread_ids});
+    return assigned;
+  }
+
+private:
+  SidecarWriter& writer_;
+  std::unordered_map<std::vector<std::uint64_t>, std::uint32_t, VectorHash> set_to_id_;
+  std::uint32_t next_set_id_ = 0;
+};
+
+void destroy_records(std::vector<bam1_t*>& records) {
+  for (bam1_t*& record : records) {
+    if (record != nullptr) {
+      bam_destroy1(record);
+      record = nullptr;
+    }
+  }
+  records.clear();
+}
+
+bam1_t* duplicate_bam_record(const bam1_t* record) {
+  bam1_t* duplicate = bam_dup1(record);
+  if (duplicate == nullptr) {
+    throw Error("unable to duplicate BAM record for " + std::string(bam_get_qname(record)));
+  }
+  return duplicate;
+}
+
+bool subpath_less(const SubpathResult& left, const SubpathResult& right) {
+  if (left.begin_offset != right.begin_offset) {
+    return left.begin_offset < right.begin_offset;
+  }
+  if (left.end_offset != right.end_offset) {
+    return left.end_offset < right.end_offset;
+  }
+  return std::lexicographical_compare(left.thread_ids.begin(), left.thread_ids.end(),
+                                      right.thread_ids.begin(), right.thread_ids.end());
+}
+
+bool subpath_equal(const SubpathResult& left, const SubpathResult& right) {
+  return left.begin_offset == right.begin_offset &&
+         left.end_offset == right.end_offset &&
+         left.thread_ids == right.thread_ids;
+}
+
+void deduplicate_subpaths(std::vector<SubpathResult>& subpaths) {
+  std::sort(subpaths.begin(), subpaths.end(), subpath_less);
+  subpaths.erase(std::unique(subpaths.begin(), subpaths.end(), subpath_equal), subpaths.end());
+}
+
 std::string build_command_line(const AnnotateOptions& options) {
   std::ostringstream out;
   out << "pgbam annotate --bam " << options.bam_path
       << " --gaf " << options.gaf_path
       << (options.use_gbz() ? " --gbz " + options.gbz_path : " --gbwt " + options.gbwt_path)
       << " --out-bam " << options.out_bam_path
-      << " --out-sets " << options.out_sets_path;
+      << " --out-sets " << options.out_sets_path
+      << " --threads " << options.threads;
   if (options.use_r_index()) {
     out << " --r-index " << options.r_index_path;
   }
-  out << " --threads " << options.threads;
+  if (options.primary_only) {
+    out << " --primary-only";
+  }
   return out.str();
 }
 
@@ -95,14 +164,6 @@ void set_or_remove_array_tag(bam1_t* record, const char tag[2], const std::vecto
                            const_cast<std::uint32_t*>(values.data())) != 0) {
     throw Error("failed to update BAM aux tag " + std::string(tag, 2));
   }
-}
-
-std::unordered_map<std::string, std::vector<OrientedNode>> load_gaf_lookup(const std::string& path) {
-  std::ifstream input(path);
-  if (!input) {
-    throw Error("cannot open GAF file: " + path);
-  }
-  return read_gaf_lookup(input);
 }
 
 sam_hdr_t* prepare_header(const sam_hdr_t* input_header, const AnnotateOptions& options) {
@@ -126,49 +187,157 @@ sam_hdr_t* prepare_header(const sam_hdr_t* input_header, const AnnotateOptions& 
   return header;
 }
 
-}  // namespace
-
-int run_annotate(const AnnotateOptions& options) {
-  const auto gaf_lookup = load_gaf_lookup(options.gaf_path);
-  const std::unique_ptr<GraphIndex> graph = make_graph_index(GraphIndex::Config{
-    options.gbz_path,
-    options.gbwt_path,
-    options.r_index_path,
-  });
-
-  const std::string fingerprint = sha256_file(options.use_gbz() ? options.gbz_path : options.gbwt_path);
-  SidecarWriter sidecar(options.out_sets_path);
-  sidecar.write_header(SidecarHeader{1, fingerprint, options.use_r_index()});
-
-  samFile* input = sam_open(options.bam_path.c_str(), "rb");
-  if (input == nullptr) {
-    throw Error("cannot open BAM file: " + options.bam_path);
+SamFilePtr open_sam_file(const std::string& path, const char* mode) {
+  samFile* handle = sam_open(path.c_str(), mode);
+  if (handle == nullptr) {
+    throw Error("cannot open BAM file: " + path);
   }
-  std::unique_ptr<samFile, decltype(&hts_close)> input_guard(input, hts_close);
-  if (options.threads > 1) {
-    hts_set_threads(input, static_cast<int>(options.threads));
+  return SamFilePtr(handle, hts_close);
+}
+
+SamHeaderPtr read_header(samFile* input, const std::string& path) {
+  sam_hdr_t* header = sam_hdr_read(input);
+  if (header == nullptr) {
+    throw Error("cannot read BAM header: " + path);
+  }
+  return SamHeaderPtr(header, sam_hdr_destroy);
+}
+
+int read_bam_record(samFile* input, sam_hdr_t* header, bam1_t* record, const std::string& path) {
+  const int status = sam_read1(input, header, record);
+  if (status < -1) {
+    throw Error("failed to read BAM record from " + path);
+  }
+  return status;
+}
+
+std::string make_gaf_qname_order_error(const std::string& path,
+                                       const std::string& previous_qname,
+                                       std::size_t previous_line,
+                                       const std::string_view current_qname,
+                                       std::size_t current_line) {
+  std::ostringstream out;
+  out << "GAF must be sorted by qname in column 1: " << path
+      << " (line " << current_line << " qname '" << current_qname
+      << "' appears after line " << previous_line << " qname '" << previous_qname
+      << "'; use: sort -k1,1 input.gaf > sorted.gaf)";
+  return out.str();
+}
+
+std::string make_bam_qname_order_error(const std::string& path,
+                                       const std::string& previous_qname,
+                                       std::size_t previous_record,
+                                       const std::string_view current_qname,
+                                       std::size_t current_record) {
+  std::ostringstream out;
+  out << "BAM must be qname-sorted: " << path
+      << " (record " << current_record << " qname '" << current_qname
+      << "' appears after record " << previous_record << " qname '" << previous_qname
+      << "'; use: samtools sort -n -o sorted.bam input.bam)";
+  return out.str();
+}
+
+std::string make_gaf_mapq_order_error(const std::string& path,
+                                      const std::string& qname,
+                                      std::size_t previous_line,
+                                      std::uint32_t previous_mapq,
+                                      std::size_t current_line,
+                                      std::uint32_t current_mapq) {
+  std::ostringstream out;
+  out << "GAF must be sorted by qname and then non-increasing MAPQ when --primary-only is used: " << path
+      << " (line " << current_line << " qname '" << qname << "' mapq " << current_mapq
+      << " appears after line " << previous_line << " mapq " << previous_mapq
+      << "; use: sort -k1,1 -k12,12nr input.gaf > sorted.gaf)";
+  return out.str();
+}
+
+void ensure_gaf_order(const AnnotateOptions& options) {
+  const std::string& path = options.gaf_path;
+  std::ifstream input(path);
+  if (!input) {
+    throw Error("cannot open GAF file: " + path);
   }
 
-  sam_hdr_t* input_header = sam_hdr_read(input);
-  if (input_header == nullptr) {
-    throw Error("cannot read BAM header: " + options.bam_path);
+  std::string previous_qname;
+  std::string line;
+  std::size_t previous_line = 0;
+  std::size_t line_number = 0;
+  std::uint32_t previous_mapq = 0;
+  while (std::getline(input, line)) {
+    ++line_number;
+    auto record = parse_gaf_line(line);
+    if (!record) {
+      continue;
+    }
+    if (!previous_qname.empty() && previous_qname > record->qname) {
+      throw Error(make_gaf_qname_order_error(path, previous_qname, previous_line, record->qname, line_number));
+    }
+    if (options.primary_only && previous_qname == record->qname && previous_mapq < record->mapq) {
+      throw Error(make_gaf_mapq_order_error(path, record->qname, previous_line, previous_mapq, line_number, record->mapq));
+    }
+    previous_qname = record->qname;
+    previous_line = line_number;
+    previous_mapq = record->mapq;
   }
-  std::unique_ptr<sam_hdr_t, decltype(&sam_hdr_destroy)> input_header_guard(input_header, sam_hdr_destroy);
+}
 
-  sam_hdr_t* output_header = prepare_header(input_header, options);
-  std::unique_ptr<sam_hdr_t, decltype(&sam_hdr_destroy)> output_header_guard(output_header, sam_hdr_destroy);
-
-  samFile* output = sam_open(options.out_bam_path.c_str(), "wb");
-  if (output == nullptr) {
-    throw Error("cannot open output BAM file: " + options.out_bam_path);
+void ensure_bam_qname_sorted(const std::string& path, std::size_t threads) {
+  auto input = open_sam_file(path, "rb");
+  if (threads > 1) {
+    hts_set_threads(input.get(), static_cast<int>(threads));
   }
-  std::unique_ptr<samFile, decltype(&hts_close)> output_guard(output, hts_close);
-  if (options.threads > 1) {
-    hts_set_threads(output, static_cast<int>(options.threads));
+  auto header = read_header(input.get(), path);
+  BamRecord record;
+  std::string previous;
+  std::size_t previous_record = 0;
+  std::size_t record_number = 0;
+  while (true) {
+    const int status = read_bam_record(input.get(), header.get(), record.get(), path);
+    if (status == -1) {
+      break;
+    }
+    ++record_number;
+    const std::string_view qname = bam_get_qname(record.get());
+    if (!previous.empty() && previous > qname) {
+      throw Error(make_bam_qname_order_error(path, previous, previous_record, qname, record_number));
+    }
+    previous.assign(qname.data(), qname.size());
+    previous_record = record_number;
+  }
+}
+
+void ensure_qname_sorted_inputs(const AnnotateOptions& options) {
+  ensure_bam_qname_sorted(options.bam_path, options.threads);
+  ensure_gaf_order(options);
+}
+
+std::optional<GafRecord> read_next_gaf_record(std::istream& input) {
+  std::string line;
+  while (std::getline(input, line)) {
+    if (auto record = parse_gaf_line(line)) {
+      return record;
+    }
+  }
+  return std::nullopt;
+}
+
+template<class PrepareItem>
+void annotate_stream(samFile* input,
+                     sam_hdr_t* input_header,
+                     const std::string& input_path,
+                     samFile* output,
+                     sam_hdr_t* output_header,
+                     const GraphIndex& graph,
+                     std::size_t threads,
+                     SidecarInterner& interner,
+                     PrepareItem prepare_item) {
+  if (threads > 1) {
+    hts_set_threads(input, static_cast<int>(threads));
+    hts_set_threads(output, static_cast<int>(threads));
   }
 
   if (sam_hdr_write(output, output_header) != 0) {
-    throw Error("cannot write BAM header: " + options.out_bam_path);
+    throw Error("cannot write BAM header");
   }
 
   std::deque<WorkItem> work_queue;
@@ -183,7 +352,7 @@ int run_annotate(const AnnotateOptions& options) {
   bool workers_done = false;
   std::atomic<bool> has_failure{false};
   std::exception_ptr failure;
-  const std::size_t max_work_queue = std::max<std::size_t>(1, options.threads * 8);
+  const std::size_t max_work_queue = std::max<std::size_t>(1, threads * 8);
 
   auto fail = [&](std::exception_ptr error) {
     std::lock_guard<std::mutex> lock(error_mutex);
@@ -200,28 +369,22 @@ int run_annotate(const AnnotateOptions& options) {
     {
       std::lock_guard<std::mutex> lock(work_mutex);
       for (WorkItem& item : work_queue) {
-        if (item.record != nullptr) {
-          bam_destroy1(item.record);
-          item.record = nullptr;
-        }
+        destroy_records(item.records);
       }
       work_queue.clear();
     }
     {
       std::lock_guard<std::mutex> lock(result_mutex);
       for (ResultItem& item : result_queue) {
-        if (item.record != nullptr) {
-          bam_destroy1(item.record);
-          item.record = nullptr;
-        }
+        destroy_records(item.records);
       }
       result_queue.clear();
     }
   };
 
   std::vector<std::thread> workers;
-  workers.reserve(options.threads);
-  for (std::size_t thread_id = 0; thread_id < options.threads; ++thread_id) {
+  workers.reserve(threads);
+  for (std::size_t thread_id = 0; thread_id < threads; ++thread_id) {
     workers.emplace_back([&]() {
       try {
         while (true) {
@@ -245,9 +408,15 @@ int run_annotate(const AnnotateOptions& options) {
 
           ResultItem result;
           result.ordinal = item.ordinal;
-          result.record = item.record;
-          if (item.walk != nullptr) {
-            result.subpaths = graph->find_subpaths(*item.walk);
+          result.records = std::move(item.records);
+          for (const std::vector<OrientedNode>& walk : item.walks) {
+            std::vector<SubpathResult> walk_subpaths = graph.find_subpaths(walk);
+            result.subpaths.insert(result.subpaths.end(),
+                                   std::make_move_iterator(walk_subpaths.begin()),
+                                   std::make_move_iterator(walk_subpaths.end()));
+          }
+          if (result.subpaths.size() > 1) {
+            deduplicate_subpaths(result.subpaths);
           }
 
           {
@@ -264,9 +433,7 @@ int run_annotate(const AnnotateOptions& options) {
 
   std::thread writer([&]() {
     try {
-      std::unordered_map<std::vector<std::uint64_t>, std::uint32_t, VectorHash> set_to_id;
       std::map<std::size_t, ResultItem> pending;
-      std::uint32_t next_set_id = 0;
       std::size_t next_ordinal = 0;
 
       while (true) {
@@ -298,38 +465,28 @@ int run_annotate(const AnnotateOptions& options) {
             if (subpath.thread_ids.empty()) {
               continue;
             }
-
-            auto found = set_to_id.find(subpath.thread_ids);
-            if (found == set_to_id.end()) {
-              const std::uint32_t assigned = next_set_id++;
-              set_to_id.emplace(subpath.thread_ids, assigned);
-              sidecar.write_set(SidecarSetRecord{assigned, subpath.thread_ids});
-              found = set_to_id.find(subpath.thread_ids);
-            }
-
-            annotation.hs.push_back(found->second);
+            annotation.hs.push_back(interner.intern(subpath.thread_ids));
             annotation.hb.push_back(subpath.begin_offset);
             annotation.he.push_back(subpath.end_offset);
           }
 
-          set_or_remove_array_tag(item.record, "hs", annotation.hs);
-          set_or_remove_array_tag(item.record, "hb", annotation.hb);
-          set_or_remove_array_tag(item.record, "he", annotation.he);
+          for (bam1_t* record : item.records) {
+            set_or_remove_array_tag(record, "hs", annotation.hs);
+            set_or_remove_array_tag(record, "hb", annotation.hb);
+            set_or_remove_array_tag(record, "he", annotation.he);
 
-          if (sam_write1(output, output_header, item.record) < 0) {
-            bam_destroy1(item.record);
-            throw Error("failed to write BAM record");
+            if (sam_write1(output, output_header, record) < 0) {
+              throw Error("failed to write BAM record");
+            }
           }
 
-          bam_destroy1(item.record);
+          destroy_records(item.records);
           ++next_ordinal;
         }
 
         if (has_failure.load()) {
           for (auto& [_, pending_item] : pending) {
-            if (pending_item.record != nullptr) {
-              bam_destroy1(pending_item.record);
-            }
+            destroy_records(pending_item.records);
           }
           return;
         }
@@ -346,34 +503,45 @@ int run_annotate(const AnnotateOptions& options) {
   try {
     BamRecord record;
     std::size_t ordinal = 0;
-    while (true) {
-      const int read_status = sam_read1(input, input_header, record.get());
-      if (read_status < -1) {
-        throw Error("failed to read BAM record from " + options.bam_path);
-      }
+    std::size_t record_number = 0;
+    bool have_record = false;
+    auto read_next_record = [&]() {
+      const int read_status = read_bam_record(input, input_header, record.get(), input_path);
       if (read_status == -1) {
-        break;
+        have_record = false;
+        return;
       }
+      have_record = true;
+      ++record_number;
+    };
 
-      const std::string qname = bam_get_qname(record.get());
-      const auto found = gaf_lookup.find(qname);
-
-      bam1_t* duplicate = bam_dup1(record.get());
-      if (duplicate == nullptr) {
-        throw Error("unable to duplicate BAM record for " + qname);
-      }
-
+    read_next_record();
+    while (have_record) {
       WorkItem item;
       item.ordinal = ordinal++;
-      item.record = duplicate;
-      item.walk = (found == gaf_lookup.end() ? nullptr : &found->second);
+
+      const std::string qname = bam_get_qname(record.get());
+      const std::size_t first_record_number = record_number;
+      while (true) {
+        item.records.push_back(duplicate_bam_record(record.get()));
+        read_next_record();
+        if (!have_record || bam_get_qname(record.get()) != qname) {
+          break;
+        }
+      }
+
+      try {
+        prepare_item(qname, first_record_number, item);
+      } catch (...) {
+        destroy_records(item.records);
+        throw;
+      }
 
       {
         std::unique_lock<std::mutex> lock(work_mutex);
         work_space.wait(lock, [&]() { return has_failure.load() || work_queue.size() < max_work_queue; });
         if (has_failure.load()) {
-          bam_destroy1(duplicate);
-          duplicate = nullptr;
+          destroy_records(item.records);
           std::lock_guard<std::mutex> error_lock(error_mutex);
           if (failure) {
             std::rethrow_exception(failure);
@@ -417,7 +585,119 @@ int run_annotate(const AnnotateOptions& options) {
       std::rethrow_exception(failure);
     }
   }
+}
 
+void run_sorted_join(const AnnotateOptions& options,
+                     const GraphIndex& graph,
+                     SidecarInterner& interner) {
+  auto input = open_sam_file(options.bam_path, "rb");
+  auto input_header = read_header(input.get(), options.bam_path);
+
+  auto output = open_sam_file(options.out_bam_path, "wb");
+  SamHeaderPtr output_header(prepare_header(input_header.get(), options), sam_hdr_destroy);
+
+  std::ifstream gaf_input(options.gaf_path);
+  if (!gaf_input) {
+    throw Error("cannot open GAF file: " + options.gaf_path);
+  }
+
+  std::string previous_bam_qname;
+  std::size_t previous_bam_record = 0;
+  std::size_t gaf_record_number = 0;
+  std::string previous_gaf_qname;
+  std::size_t previous_gaf_record = 0;
+  std::optional<GafRecord> current_gaf;
+
+  auto advance_gaf = [&]() {
+    current_gaf = read_next_gaf_record(gaf_input);
+    if (!current_gaf) {
+      return;
+    }
+    ++gaf_record_number;
+    if (!previous_gaf_qname.empty() && current_gaf->qname < previous_gaf_qname) {
+      throw Error(make_gaf_qname_order_error(options.gaf_path,
+                                             previous_gaf_qname,
+                                             previous_gaf_record,
+                                             current_gaf->qname,
+                                             gaf_record_number));
+    }
+    previous_gaf_qname = current_gaf->qname;
+    previous_gaf_record = gaf_record_number;
+  };
+
+  auto collect_gaf_walks_for_current_qname = [&]() {
+    std::vector<std::vector<OrientedNode>> walks;
+    if (!current_gaf) {
+      return walks;
+    }
+
+    const std::string qname = current_gaf->qname;
+    walks.push_back(current_gaf->nodes);
+    std::uint32_t previous_mapq = current_gaf->mapq;
+    std::size_t previous_mapq_record = gaf_record_number;
+    advance_gaf();
+
+    while (current_gaf && current_gaf->qname == qname) {
+      if (options.primary_only && previous_mapq < current_gaf->mapq) {
+        throw Error(make_gaf_mapq_order_error(options.gaf_path,
+                                              qname,
+                                              previous_mapq_record,
+                                              previous_mapq,
+                                              gaf_record_number,
+                                              current_gaf->mapq));
+      }
+      if (!options.primary_only) {
+        walks.push_back(current_gaf->nodes);
+      }
+      previous_mapq = current_gaf->mapq;
+      previous_mapq_record = gaf_record_number;
+      advance_gaf();
+    }
+
+    return walks;
+  };
+
+  advance_gaf();
+  annotate_stream(input.get(), input_header.get(), options.bam_path, output.get(), output_header.get(),
+                  graph, options.threads, interner,
+                  [&](std::string_view qname, std::size_t first_record_number, WorkItem& item) {
+                    if (!previous_bam_qname.empty() && previous_bam_qname > qname) {
+                      throw Error(make_bam_qname_order_error(options.bam_path,
+                                                             previous_bam_qname,
+                                                             previous_bam_record,
+                                                             qname,
+                                                             first_record_number));
+                    }
+                    previous_bam_qname.assign(qname.data(), qname.size());
+                    previous_bam_record = first_record_number;
+
+                    while (current_gaf && current_gaf->qname < qname) {
+                      advance_gaf();
+                    }
+
+                    if (current_gaf && current_gaf->qname == qname) {
+                      item.walks = collect_gaf_walks_for_current_qname();
+                    }
+                  });
+}
+
+}  // namespace
+
+int run_annotate(const AnnotateOptions& options) {
+  ensure_qname_sorted_inputs(options);
+
+  const std::unique_ptr<GraphIndex> graph = make_graph_index(GraphIndex::Config{
+    options.gbz_path,
+    options.gbwt_path,
+    options.r_index_path,
+  });
+
+  const std::string fingerprint = sha256_file(options.use_gbz() ? options.gbz_path : options.gbwt_path);
+  SidecarWriter sidecar(options.out_sets_path);
+  sidecar.write_header(SidecarHeader{1, fingerprint, options.use_r_index()});
+  SidecarInterner interner(sidecar);
+
+  run_sorted_join(options, *graph, interner);
   return 0;
 }
 

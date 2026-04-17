@@ -144,6 +144,28 @@ int main() {
     assert(command.command == pgbam::CommandLine::Command::Annotate);
     assert(command.annotate.gbwt_path == "graph.gbwt");
     assert(command.annotate.threads == 4);
+    assert(!command.annotate.primary_only);
+  }
+
+  {
+    std::vector<std::string> args = {
+      "pgbam",
+      "annotate",
+      "--bam", "in.bam",
+      "--gaf", "in.gaf",
+      "--gbwt", "graph.gbwt",
+      "--out-bam", "out.bam",
+      "--out-sets", "out.pgs",
+      "--primary-only",
+    };
+    std::vector<char*> argv;
+    argv.reserve(args.size());
+    for (std::string& arg : args) {
+      argv.push_back(arg.data());
+    }
+
+    const pgbam::CommandLine command = pgbam::parse_command_line(static_cast<int>(argv.size()), argv.data());
+    assert(command.annotate.primary_only);
   }
 
   {
@@ -156,6 +178,32 @@ int main() {
       "--out-bam", "out.bam",
       "--out-sets", "out.pgs",
       "--threads", "4x",
+    };
+    std::vector<char*> argv;
+    argv.reserve(args.size());
+    for (std::string& arg : args) {
+      argv.push_back(arg.data());
+    }
+
+    bool threw = false;
+    try {
+      (void) pgbam::parse_command_line(static_cast<int>(argv.size()), argv.data());
+    } catch (const pgbam::Error&) {
+      threw = true;
+    }
+    assert(threw);
+  }
+
+  {
+    std::vector<std::string> args = {
+      "pgbam",
+      "annotate",
+      "--bam", "in.bam",
+      "--gaf", "in.gaf",
+      "--gbwt", "graph.gbwt",
+      "--out-bam", "out.bam",
+      "--out-sets", "out.pgs",
+      "--invalid-option",
     };
     std::vector<char*> argv;
     argv.reserve(args.size());

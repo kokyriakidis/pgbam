@@ -9,6 +9,12 @@
 namespace pgbam {
 namespace {
 
+std::size_t estimate_lookup_entry_bytes(const GafRecord& record) {
+  const std::size_t node_bytes = record.nodes.size() * sizeof(OrientedNode);
+  const std::size_t payload = record.qname.size() + node_bytes;
+  return 192 + (payload * 2);
+}
+
 std::uint64_t parse_u64(std::string_view value, std::string_view field_name) {
   std::uint64_t result = 0;
   const auto* begin = value.data();
@@ -100,13 +106,20 @@ std::vector<GafRecord> read_gaf_records(std::istream& in) {
   return records;
 }
 
-std::unordered_map<std::string, std::vector<OrientedNode>> read_gaf_lookup(std::istream& in) {
+std::unordered_map<std::string, std::vector<OrientedNode>> read_gaf_lookup(std::istream& in,
+                                                                           std::size_t memory_budget_bytes) {
   std::unordered_map<std::string, std::vector<OrientedNode>> lookup;
+  std::size_t estimated_bytes = 0;
   std::string line;
   while (std::getline(in, line)) {
     auto record = parse_gaf_line(line);
     if (!record) {
       continue;
+    }
+
+    estimated_bytes += estimate_lookup_entry_bytes(*record);
+    if (memory_budget_bytes != 0 && estimated_bytes > memory_budget_bytes) {
+      throw MemoryBudgetExceeded("GAF lookup exceeds memory budget", estimated_bytes, memory_budget_bytes);
     }
 
     auto inserted = lookup.emplace(std::move(record->qname), std::move(record->nodes));

@@ -88,6 +88,8 @@ CommandLine parse_command_line(int argc, char** argv) {
         result.annotate.out_sets_path = require_value(index, argc, argv, option);
       } else if (option == "--threads") {
         result.annotate.threads = parse_threads(require_value(index, argc, argv, option));
+      } else if (option == "--primary-only") {
+        result.annotate.primary_only = true;
       } else {
         throw Error("unknown annotate option: " + std::string(option));
       }

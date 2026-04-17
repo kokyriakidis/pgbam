@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <optional>
 #include <string>
 
 namespace pgbam {
@@ -15,6 +14,7 @@ struct AnnotateOptions {
   std::string out_bam_path;
   std::string out_sets_path;
   std::size_t threads = 1;
+  bool primary_only = false;
 
   bool use_gbz() const { return !gbz_path.empty(); }
   bool use_r_index() const { return !r_index_path.empty(); }
