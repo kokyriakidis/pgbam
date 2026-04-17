@@ -120,6 +120,13 @@ pgbam annotate
 
 The r-index accelerates the locate step — recovering which haplotype paths pass through each aligned subpath. For large cohorts or deeply sequenced samples, supplying it meaningfully reduces runtime.
 
+**Memory model:**
+
+- The BAM and GAF inputs are streamed during annotation.
+- The GBZ or GBWT index is loaded into memory before annotation starts.
+- If an r-index is provided, it is also loaded into memory.
+- In practice, RAM usage is therefore driven primarily by the graph index files, not by the BAM/GAF join itself.
+
 **Input requirements:**
 
 - `pgbam annotate` requires both BAM and GAF to be non-decreasing by `qname`.
