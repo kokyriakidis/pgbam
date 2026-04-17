@@ -1,0 +1,49 @@
+# Build & install trees
+/build/
+/bin/
+/lib/
+
+# CMake-generated files (out-of-source build keeps these in /build/, but
+# guard against accidental in-source configure runs too)
+/Testing/
+/CMakeFiles/
+/CMakeCache.txt
+/CTestTestfile.cmake
+/DartConfiguration.tcl
+/Makefile
+/cmake_install.cmake
+/compile_commands.json
+/install_manifest.txt
+/CPackConfig.cmake
+/CPackSourceConfig.cmake
+
+# Compiled object & binary artifacts
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.exe
+
+# macOS
+.DS_Store
+*.dSYM/
+
+# IDE & editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.cproject
+
+# Language-server caches
+.cache/
+.ccls-cache/
+
+# Tags
+tags
+TAGS
