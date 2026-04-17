@@ -106,7 +106,6 @@ public:
       for (gbwt::size_type sequence_id : located) {
         path_ids.push_back(static_cast<std::uint64_t>(gbwt::Path::id(sequence_id)));
       }
-      std::sort(path_ids.begin(), path_ids.end());
       path_ids.erase(std::unique(path_ids.begin(), path_ids.end()), path_ids.end());
 
       result.push_back(SubpathResult{
