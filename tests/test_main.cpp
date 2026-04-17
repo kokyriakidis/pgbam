@@ -2,8 +2,10 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "pgbam/cli.hpp"
@@ -12,6 +14,8 @@
 #include "pgbam/sidecar.hpp"
 
 int main() {
+  static_assert(sizeof(pgbam::OrientedNode) == sizeof(std::uint64_t));
+
   {
     const auto nodes = pgbam::parse_target_walk(">2>3<4");
     const pgbam::OrientedNode first{2, false};
@@ -30,10 +34,32 @@ int main() {
     assert(parsed.has_value());
     assert(parsed->qname == "read1");
     assert(parsed->query_length == 6);
-    assert(parsed->target_walk == ">2>3>4");
     assert(parsed->nodes.size() == 3);
     assert(parsed->nodes[0] == first);
     assert(parsed->nodes[2] == last);
+  }
+
+  {
+    std::istringstream gaf(
+      "read1\t6\t0\t6\t+\t>2>3>4\t12\t2\t8\t6\t6\t60\tcs:Z::6\n"
+      "read2\t6\t0\t6\t+\t>5<6\t12\t2\t8\t6\t6\t60\tcs:Z::6\n");
+    const auto lookup = pgbam::read_gaf_lookup(gaf);
+    assert(lookup.size() == 2);
+    assert(lookup.at("read1").size() == 3);
+    assert(lookup.at("read2").size() == 2);
+  }
+
+  {
+    std::istringstream gaf(
+      "read1\t6\t0\t6\t+\t>2>3>4\t12\t2\t8\t6\t6\t60\tcs:Z::6\n"
+      "read1\t6\t0\t6\t+\t>5<6\t12\t2\t8\t6\t6\t60\tcs:Z::6\n");
+    bool threw = false;
+    try {
+      (void) pgbam::read_gaf_lookup(gaf);
+    } catch (const pgbam::Error&) {
+      threw = true;
+    }
+    assert(threw);
   }
 
   {

@@ -1,5 +1,6 @@
 #include "pgbam/bam_io.hpp"
 
+#include <algorithm>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -101,17 +102,7 @@ std::unordered_map<std::string, std::vector<OrientedNode>> load_gaf_lookup(const
   if (!input) {
     throw Error("cannot open GAF file: " + path);
   }
-
-  const std::vector<GafRecord> records = read_gaf_records(input);
-  std::unordered_map<std::string, std::vector<OrientedNode>> lookup;
-  lookup.reserve(records.size());
-  for (const GafRecord& record : records) {
-    const auto inserted = lookup.emplace(record.qname, record.nodes);
-    if (!inserted.second) {
-      throw Error("ambiguous GAF mapping for read name: " + record.qname);
-    }
-  }
-  return lookup;
+  return read_gaf_lookup(input);
 }
 
 sam_hdr_t* prepare_header(const sam_hdr_t* input_header, const AnnotateOptions& options) {
@@ -186,11 +177,13 @@ int run_annotate(const AnnotateOptions& options) {
   std::mutex result_mutex;
   std::mutex error_mutex;
   std::condition_variable work_ready;
+  std::condition_variable work_space;
   std::condition_variable result_ready;
   bool input_done = false;
   bool workers_done = false;
   std::atomic<bool> has_failure{false};
   std::exception_ptr failure;
+  const std::size_t max_work_queue = std::max<std::size_t>(1, options.threads * 8);
 
   auto fail = [&](std::exception_ptr error) {
     std::lock_guard<std::mutex> lock(error_mutex);
@@ -199,6 +192,7 @@ int run_annotate(const AnnotateOptions& options) {
       has_failure.store(true);
     }
     work_ready.notify_all();
+    work_space.notify_all();
     result_ready.notify_all();
   };
 
@@ -247,6 +241,7 @@ int run_annotate(const AnnotateOptions& options) {
             item = std::move(work_queue.front());
             work_queue.pop_front();
           }
+          work_space.notify_one();
 
           ResultItem result;
           result.ordinal = item.ordinal;
@@ -360,13 +355,6 @@ int run_annotate(const AnnotateOptions& options) {
         break;
       }
 
-      {
-        std::lock_guard<std::mutex> lock(error_mutex);
-        if (failure) {
-          std::rethrow_exception(failure);
-        }
-      }
-
       const std::string qname = bam_get_qname(record.get());
       const auto found = gaf_lookup.find(qname);
 
@@ -381,7 +369,17 @@ int run_annotate(const AnnotateOptions& options) {
       item.walk = (found == gaf_lookup.end() ? nullptr : &found->second);
 
       {
-        std::lock_guard<std::mutex> lock(work_mutex);
+        std::unique_lock<std::mutex> lock(work_mutex);
+        work_space.wait(lock, [&]() { return has_failure.load() || work_queue.size() < max_work_queue; });
+        if (has_failure.load()) {
+          bam_destroy1(duplicate);
+          duplicate = nullptr;
+          std::lock_guard<std::mutex> error_lock(error_mutex);
+          if (failure) {
+            std::rethrow_exception(failure);
+          }
+          throw Error("annotation failed");
+        }
         work_queue.push_back(std::move(item));
       }
       work_ready.notify_one();

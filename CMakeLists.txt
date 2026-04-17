@@ -19,6 +19,24 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable external project tests" FORCE)
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
+find_package(OpenMP)
+
+set(PGBAM_OPENMP_INCLUDE_DIRS)
+set(PGBAM_OPENMP_COMPILE_OPTIONS)
+if(NOT OpenMP_CXX_FOUND AND APPLE)
+  set(PGBAM_LIBOMP_PREFIX "/opt/homebrew/opt/libomp")
+  if(EXISTS "${PGBAM_LIBOMP_PREFIX}/include/omp.h" AND EXISTS "${PGBAM_LIBOMP_PREFIX}/lib/libomp.dylib")
+    add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
+    set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
+      INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
+      INTERFACE_INCLUDE_DIRECTORIES "${PGBAM_LIBOMP_PREFIX}/include"
+      INTERFACE_LINK_LIBRARIES "${PGBAM_LIBOMP_PREFIX}/lib/libomp.dylib"
+    )
+    set(OpenMP_CXX_FOUND TRUE)
+    list(APPEND PGBAM_OPENMP_INCLUDE_DIRS "${PGBAM_LIBOMP_PREFIX}/include")
+    list(APPEND PGBAM_OPENMP_COMPILE_OPTIONS "-Xpreprocessor" "-fopenmp")
+  endif()
+endif()
 
 pkg_check_modules(HTSLIB REQUIRED IMPORTED_TARGET htslib)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
@@ -47,6 +65,9 @@ add_subdirectory(external/sdsl-lite EXCLUDE_FROM_ALL)
 add_subdirectory(external/libhandlegraph EXCLUDE_FROM_ALL)
 
 set(PGBAM_PARALLEL_LIBS Threads::Threads)
+if(OpenMP_CXX_FOUND)
+  list(APPEND PGBAM_PARALLEL_LIBS OpenMP::OpenMP_CXX)
+endif()
 
 add_library(gbwt STATIC
   external/gbwt/src/algorithms.cpp
@@ -67,7 +88,9 @@ target_include_directories(gbwt
   PUBLIC
     external/gbwt/include
     external/sdsl-lite/include
+    ${PGBAM_OPENMP_INCLUDE_DIRS}
 )
+target_compile_options(gbwt PRIVATE ${PGBAM_OPENMP_COMPILE_OPTIONS})
 target_link_libraries(gbwt
   PUBLIC
     sdsl
@@ -95,7 +118,9 @@ target_include_directories(gbwtgraph
     external/gbwt/include
     external/sdsl-lite/include
     external/libhandlegraph/src/include
+    ${PGBAM_OPENMP_INCLUDE_DIRS}
 )
+target_compile_options(gbwtgraph PRIVATE ${PGBAM_OPENMP_COMPILE_OPTIONS})
 target_link_libraries(gbwtgraph
   PUBLIC
     gbwt

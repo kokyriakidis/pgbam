@@ -8,8 +8,8 @@
 namespace pgbam {
 
 struct OrientedNode {
-  std::uint64_t id = 0;
-  bool reverse = false;
+  std::uint64_t id      : 63;
+  std::uint64_t reverse : 1;
 
   bool operator==(const OrientedNode& other) const = default;
 };
@@ -20,7 +20,6 @@ struct GafRecord {
   std::uint64_t query_start = 0;
   std::uint64_t query_end = 0;
   char strand = '+';
-  std::string target_walk;
   std::vector<OrientedNode> nodes;
   std::uint64_t target_length = 0;
   std::uint64_t target_start = 0;

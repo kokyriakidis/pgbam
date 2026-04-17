@@ -1,8 +1,8 @@
 #include "pgbam/gaf.hpp"
 
 #include <charconv>
-#include <sstream>
 #include <string_view>
+#include <unordered_map>
 
 #include "pgbam/error.hpp"
 
@@ -37,13 +37,13 @@ std::vector<std::string_view> split_tab_fields(const std::string& line) {
 
 }  // namespace
 
-std::vector<OrientedNode> parse_target_walk(const std::string& walk) {
+std::vector<OrientedNode> parse_target_walk(std::string_view walk) {
   std::vector<OrientedNode> result;
   std::size_t index = 0;
   while (index < walk.size()) {
     const char orientation = walk[index];
     if (orientation != '>' && orientation != '<') {
-      throw Error("invalid target walk orientation in '" + walk + "'");
+      throw Error("invalid target walk orientation in '" + std::string(walk) + "'");
     }
     ++index;
     const std::size_t start = index;
@@ -51,7 +51,7 @@ std::vector<OrientedNode> parse_target_walk(const std::string& walk) {
       ++index;
     }
     if (start == index) {
-      throw Error("missing node id in target walk '" + walk + "'");
+      throw Error("missing node id in target walk '" + std::string(walk) + "'");
     }
     const std::string_view token(walk.data() + start, index - start);
     result.push_back(OrientedNode{parse_u64(token, "target_walk_node"), orientation == '<'});
@@ -78,8 +78,7 @@ std::optional<GafRecord> parse_gaf_line(const std::string& line) {
     throw Error("invalid GAF strand field in line: " + line);
   }
   record.strand = fields[4][0];
-  record.target_walk = std::string(fields[5]);
-  record.nodes = parse_target_walk(record.target_walk);
+  record.nodes = parse_target_walk(fields[5]);
   record.target_length = parse_u64(fields[6], "target_length");
   record.target_start = parse_u64(fields[7], "target_start");
   record.target_end = parse_u64(fields[8], "target_end");
@@ -99,6 +98,23 @@ std::vector<GafRecord> read_gaf_records(std::istream& in) {
     }
   }
   return records;
+}
+
+std::unordered_map<std::string, std::vector<OrientedNode>> read_gaf_lookup(std::istream& in) {
+  std::unordered_map<std::string, std::vector<OrientedNode>> lookup;
+  std::string line;
+  while (std::getline(in, line)) {
+    auto record = parse_gaf_line(line);
+    if (!record) {
+      continue;
+    }
+
+    auto inserted = lookup.emplace(std::move(record->qname), std::move(record->nodes));
+    if (!inserted.second) {
+      throw Error("ambiguous GAF mapping for read name: " + inserted.first->first);
+    }
+  }
+  return lookup;
 }
 
 }  // namespace pgbam
