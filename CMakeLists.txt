@@ -19,30 +19,34 @@ set(BUILD_TESTING OFF CACHE BOOL "Disable external project tests" FORCE)
 find_package(PkgConfig REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
-find_package(OpenMP)
-if(NOT OpenMP_CXX_FOUND AND APPLE)
-  set(PGBAM_LIBOMP_PREFIX "/opt/homebrew/opt/libomp")
-  if(EXISTS "${PGBAM_LIBOMP_PREFIX}/include/omp.h" AND EXISTS "${PGBAM_LIBOMP_PREFIX}/lib/libomp.dylib")
-    add_library(OpenMP::OpenMP_CXX INTERFACE IMPORTED)
-    set_target_properties(OpenMP::OpenMP_CXX PROPERTIES
-      INTERFACE_COMPILE_OPTIONS "-Xpreprocessor;-fopenmp"
-      INTERFACE_INCLUDE_DIRECTORIES "${PGBAM_LIBOMP_PREFIX}/include"
-      INTERFACE_LINK_LIBRARIES "${PGBAM_LIBOMP_PREFIX}/lib/libomp.dylib"
-    )
-    set(OpenMP_CXX_FOUND TRUE)
-  endif()
-endif()
 
 pkg_check_modules(HTSLIB REQUIRED IMPORTED_TARGET htslib)
 pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+
+# patchelf is only needed on Linux at install time to produce a self-contained
+# package.  If it is not already on PATH we build it from source so the user
+# never has to install it manually.
+if(UNIX AND NOT APPLE)
+  find_program(PATCHELF_EXECUTABLE patchelf)
+  if(NOT PATCHELF_EXECUTABLE)
+    message(STATUS "patchelf not found in PATH — will build from source")
+    include(ExternalProject)
+    set(_patchelf_prefix "${CMAKE_BINARY_DIR}/patchelf-host")
+    ExternalProject_Add(patchelf_host
+      URL      https://github.com/NixOS/patchelf/releases/download/0.18.0/patchelf-0.18.0.tar.bz2
+      CONFIGURE_COMMAND <SOURCE_DIR>/configure --prefix=<INSTALL_DIR>
+      BUILD_COMMAND     make
+      INSTALL_COMMAND   make install
+      PREFIX            "${_patchelf_prefix}"
+    )
+    set(PATCHELF_EXECUTABLE "${_patchelf_prefix}/bin/patchelf")
+  endif()
+endif()
 
 add_subdirectory(external/sdsl-lite EXCLUDE_FROM_ALL)
 add_subdirectory(external/libhandlegraph EXCLUDE_FROM_ALL)
 
 set(PGBAM_PARALLEL_LIBS Threads::Threads)
-if(OpenMP_CXX_FOUND)
-  list(APPEND PGBAM_PARALLEL_LIBS OpenMP::OpenMP_CXX)
-endif()
 
 add_library(gbwt STATIC
   external/gbwt/src/algorithms.cpp
@@ -153,6 +157,9 @@ endif()
 
 add_executable(pgbam src/main.cpp)
 target_link_libraries(pgbam PRIVATE pgbam_shared)
+if(TARGET patchelf_host)
+  add_dependencies(pgbam patchelf_host)
+endif()
 if(APPLE)
   set_target_properties(pgbam PROPERTIES INSTALL_RPATH "@loader_path/../${CMAKE_INSTALL_LIBDIR}")
   set_target_properties(pgbam_shared PROPERTIES INSTALL_RPATH "@loader_path")
@@ -261,10 +268,9 @@ elseif(UNIX)
     cmake_policy(SET CMP0011 NEW)
     cmake_policy(SET CMP0057 NEW)
 
-    find_program(_patchelf patchelf)
-    if(NOT _patchelf)
-      message(WARNING \"patchelf not found — skipping runtime library bundling. \
-Install patchelf to produce a self-contained package.\")
+    set(_patchelf \"${PATCHELF_EXECUTABLE}\")
+    if(NOT EXISTS \"\${_patchelf}\")
+      message(WARNING \"patchelf not available — skipping runtime library bundling.\")
       return()
     endif()
 

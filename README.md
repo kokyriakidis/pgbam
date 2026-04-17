@@ -1,10 +1,11 @@
 # pgbam
 
-Annotate BAM files with pangenome graph path information.
+pgbam bridges pangenome graph alignments and the BAM ecosystem. Given a set of reads aligned to a pangenome graph (GAF format) and a haplotype index (GBWT or GBZ), it annotates each read in the BAM file with the haplotype paths it traverses and writes a compact sidecar file that maps those annotations back to named samples and haplotypes.
 
-`pgbam annotate` takes a BAM file, a GAF file mapping reads to a pangenome graph, and a GBWT/GBZ graph index. It writes an annotated BAM where each read carries auxiliary tags describing which graph threads (haplotype paths) it traverses, plus a sidecar metadata file for decoding.
-
-`pgbam decode` converts the sidecar file back into a human-readable TSV of thread identities.
+The typical workflow is:
+1. Align reads to a pangenome graph (e.g. with `vg giraffe`) → produces a GAF file.
+2. Run `pgbam annotate` with the BAM, GAF, and graph index → produces an annotated BAM and a `.pgbam` sidecar.
+3. Run `pgbam decode` on the sidecar to get a human-readable TSV of thread identities.
 
 ---
 
@@ -20,17 +21,16 @@ Annotate BAM files with pangenome graph path information.
 | OpenSSL | any recent | `brew install openssl` / `apt install libssl-dev` |
 | Zstandard | any recent | `brew install zstd` / `apt install libzstd-dev` |
 
-### Optional but recommended
+### Optional
 
 | Dependency | Purpose | Install |
 |---|---|---|
-| OpenMP | multi-threaded annotation | `brew install libomp` / `apt install libomp-dev` |
-| patchelf | **Linux only** — self-contained install (see [Installing](#installing)) | `apt install patchelf` / `conda install patchelf` |
+| patchelf | **Linux only** — self-contained install (see [Installing](#installing)) | auto-built if not found on `PATH` |
 
 ### Bundled (via git submodules)
 
 - [sdsl-lite](https://github.com/vgteam/sdsl-lite) — compressed data structures
-- [gbwt](https://github.com/jltsiren/gbwt) — graph BWT index
+- [gbwt](https://github.com/jltsiren/gbwt) — graph BWT and r-index
 - [gbwtgraph](https://github.com/jltsiren/gbwtgraph) — graph query layer
 - [libhandlegraph](https://github.com/vgteam/libhandlegraph) — pangenome graph interface
 
@@ -70,15 +70,13 @@ This installs:
   lib/libpgbam.dylib   (macOS) / libpgbam.so  (Linux)
   lib/libhts.*         ← bundled at install time
   lib/libzstd.*        ← bundled at install time
-  lib/libomp.*         ← bundled at install time (if used)
-  ...
   include/pgbam/
   lib/cmake/pgbam/
 ```
 
 The install step automatically copies all non-system runtime libraries into `lib/` and rewrites their load paths so the installation is self-contained — no Homebrew, conda, or package manager prefix needs to be present on the target machine.
 
-**Linux note:** `patchelf` must be on `PATH` at install time for the bundling step to run. If it is not found, a warning is printed and the install proceeds without bundling (the binary will depend on system-installed libraries at runtime).
+**Linux note:** `patchelf` is required for the bundling step. If it is not on `PATH`, it is automatically built from source during `cmake --build` and used transparently — no manual install needed.
 
 ---
 
@@ -89,33 +87,41 @@ The install step automatically copies all non-system runtime libraries into `lib
 Annotate a BAM file with graph thread information.
 
 ```
-pgbam annotate --bam <in.bam> --gaf <in.gaf> \
-               (--gbz <graph.gbz> | --gbwt <graph.gbwt>) \
-               --out-bam <out.bam> --out-sets <out.pgbam> \
-               [--r-index <graph.ri>] [--threads <N>]
+pgbam annotate
+    --bam     <in.bam>
+    --gaf     <in.gaf>
+    --out-bam <out.bam>
+    --out-sets <out.pgbam>
+  ( --gbz   <graph.gbz>
+  | --gbwt  <graph.gbwt> )
+  [ --r-index  <graph.ri> ]
+  [ --threads  <N> ]
 ```
 
 | Flag | Required | Description |
 |---|---|---|
 | `--bam` | yes | Input BAM file |
 | `--gaf` | yes | Input GAF file (read-to-graph alignments) |
-| `--gbz` | one of | GBZ graph index |
-| `--gbwt` | one of | GBWT graph index |
 | `--out-bam` | yes | Output annotated BAM file |
 | `--out-sets` | yes | Output sidecar metadata file (`.pgbam`) |
-| `--r-index` | no | R-index for the graph (speeds up path lookup) |
+| `--gbz` | one of | GBZ graph index |
+| `--gbwt` | one of | GBWT graph index |
+| `--r-index` | no | R-index (`.ri`) for the GBWT — enables faster locate queries; build with `gbwt` tools |
 | `--threads` | no | Worker threads (default: 1) |
+
+The r-index accelerates the locate step — recovering which haplotype paths pass through each aligned subpath. For large cohorts or deeply sequenced samples, supplying it meaningfully reduces runtime.
 
 **Example:**
 
 ```bash
 pgbam annotate \
-  --bam reads.bam \
-  --gaf reads.gaf \
-  --gbz hprc.gbz \
-  --out-bam reads.annotated.bam \
-  --out-sets reads.pgbam \
-  --threads 8
+    --bam      reads.bam \
+    --gaf      reads.gaf \
+    --gbz      hprc.gbz \
+    --out-bam  reads.annotated.bam \
+    --out-sets reads.pgbam \
+    --r-index  hprc.ri \
+    --threads  8
 ```
 
 **BAM tags written to each read:**
@@ -139,25 +145,27 @@ Tags are omitted on reads with no valid graph mapping. The BAM header gains a `@
 Decode a sidecar file into a TSV of thread identities.
 
 ```
-pgbam decode --sets <in.pgbam> \
-             (--gbz <graph.gbz> | --gbwt <graph.gbwt>) \
-             --out <out.tsv>
+pgbam decode
+    --sets <in.pgbam>
+    --out  <out.tsv>
+  ( --gbz   <graph.gbz>
+  | --gbwt  <graph.gbwt> )
 ```
 
 | Flag | Required | Description |
 |---|---|---|
 | `--sets` | yes | Sidecar metadata file produced by `annotate` |
+| `--out` | yes | Output TSV file |
 | `--gbz` | one of | GBZ graph index (must match the one used at annotation) |
 | `--gbwt` | one of | GBWT graph index |
-| `--out` | yes | Output TSV file |
 
 **Example:**
 
 ```bash
 pgbam decode \
-  --sets reads.pgbam \
-  --gbz hprc.gbz \
-  --out threads.tsv
+    --sets reads.pgbam \
+    --gbz  hprc.gbz \
+    --out  threads.tsv
 ```
 
 **Output columns:**
