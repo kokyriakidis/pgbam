@@ -41,7 +41,7 @@ Annotate BAM files with pangenome graph path information.
 Clone with submodules:
 
 ```bash
-git clone --recurse-submodules https://github.com/<you>/pgbam.git
+git clone --recurse-submodules https://github.com/kokyriakidis/pgbam.git
 cd pgbam
 ```
 
