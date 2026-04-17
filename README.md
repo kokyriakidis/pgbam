@@ -7,7 +7,7 @@ pgbam bridges pangenome graph alignments and the BAM ecosystem. Given a set of r
 The typical workflow is:
 1. Align reads to a pangenome graph (e.g. with `vg giraffe`) → produces a GAF file.
 2. Run `pgbam annotate` with the BAM, GAF, and graph index → produces an annotated BAM and a `.pgbam` sidecar.
-3. Run `pgbam decode` on the sidecar to get a human-readable TSV of thread identities.
+3. If you want a human-readable view of the thread identities stored in the sidecar, run `pgbam decode` to export them as a TSV.
 
 ---
 
