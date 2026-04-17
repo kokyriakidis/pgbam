@@ -86,6 +86,11 @@ The install step automatically copies all non-system runtime libraries into `lib
 
 Annotate a BAM file with graph thread information.
 
+> **GAM input:** pgbam accepts GAF only. If your aligner produced a GAM file (vg's binary protobuf format), convert it first:
+> ```bash
+> vg convert -G alignments.gam > alignments.gaf
+> ```
+
 ```
 pgbam annotate
     --bam     <in.bam>
