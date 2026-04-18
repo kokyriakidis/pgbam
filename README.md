@@ -204,7 +204,7 @@ pgbam annotate
 | `--gbwt` | one of | GBWT graph index |
 | `--r-index` | no | R-index (`.ri`) for the GBWT — enables faster locate queries |
 | `--threads` | no | Worker threads (default: 1) |
-| `--primary-only` | no | Use only the first GAF alignment in each `qname` block; annotate every BAM record with that `qname` from that primary alignment's set |
+| `--primary-only` | no | Use only the highest-MAPQ GAF alignment per `qname` (first in the block after sorting by decreasing MAPQ); annotate every BAM record with that `qname` from that alignment's set |
 
 The r-index accelerates the locate step — recovering which haplotype paths pass through each aligned subpath. For large cohorts or deeply sequenced samples, supplying it meaningfully reduces runtime.
 
@@ -227,7 +227,7 @@ Both formats give identical annotation results. The difference is load time and 
 - This ordering is recommended in general and is required for `--primary-only`, because `pgbam` uses the first GAF alignment in each `qname` block as the primary one.
 - Sorting by `qname` groups identical names together, but it does not create a reliable per-record order within a duplicate-name block.
 - By default, `pgbam` aggregates all GAF alignments in a `qname` block, combines their graph matches, and applies the same aggregated annotation to every BAM record in the matching `qname` block.
-- With `--primary-only`, `pgbam` uses only the first GAF alignment in each `qname` block and applies that annotation to every BAM record in the matching `qname` block.
+- With `--primary-only`, `pgbam` uses only the first GAF alignment in each `qname` block and applies that annotation to every BAM record in the matching `qname` block. Because the GAF is sorted by decreasing MAPQ within each `qname` block, that first alignment is the highest-MAPQ (primary) alignment.
 - If your pipeline needs one-to-one pairing between multiple BAM records and multiple GAF records with the same read name, `qname` alone is not a sufficient join key.
 
 **Example:**
