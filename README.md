@@ -11,6 +11,78 @@ The typical workflow is:
 
 ---
 
+## End-to-end example
+
+**Scenario:** HiFi reads from sample HG002 aligned to the HPRC pangenome graph with `vg giraffe`. The goal is to annotate each read with the donor haplotypes it is most consistent with, and export a TSV mapping those annotations to named samples.
+
+**Inputs:**
+
+```
+HG002.bam                        # coordinate-sorted BAM from your aligner
+HG002.gam                        # graph alignments from vg giraffe (GAM format)
+hprc-v2.1-mc-chm13-eval.gbz     # GBZ pangenome graph index
+hprc-v2.1-mc-chm13-eval.gbwt    # GBWT haplotype index
+hprc-v2.1-mc-chm13-eval.ri      # r-index (optional, speeds up annotation)
+```
+
+**Step 1 — Convert GAM to GAF** (skip if your aligner already produced a GAF):
+
+```bash
+vg convert -G HG002.gam hprc-v2.1-mc-chm13-eval.gbz > HG002.gaf
+```
+
+**Step 2 — Sort inputs by query name:**
+
+```bash
+samtools sort -n -@ 8 -o HG002.qname.bam HG002.bam
+sort -k1,1V -k12,12nr HG002.gaf > HG002.qname.mapq.gaf
+```
+
+**Step 3 — Annotate:**
+
+```bash
+pgbam annotate \
+    --bam      HG002.qname.bam \
+    --gaf      HG002.qname.mapq.gaf \
+    --gbwt     hprc-v2.1-mc-chm13-eval.gbwt \
+    --r-index  hprc-v2.1-mc-chm13-eval.ri \
+    --out-bam  HG002.annotated.bam \
+    --out-sets HG002.pgbam \
+    --threads  8
+```
+
+Each read in `HG002.annotated.bam` now carries three BAM tags:
+
+```
+hs:B:I,4,7    <- set IDs: two subpath matches
+hb:B:I,0,391  <- start offset within node for each match
+he:B:I,391,520 <- end offset (exclusive) for each match
+```
+
+`hs` indexes into `HG002.pgbam`. A read with a single `hs` entry maps entirely within one group of haplotype paths; multiple entries mean the read spans graph regions where different haplotypes diverge.
+
+**Step 4 — Decode to TSV:**
+
+```bash
+pgbam decode \
+    --sets HG002.pgbam \
+    --gbwt hprc-v2.1-mc-chm13-eval.gbwt \
+    --out  HG002.threads.tsv
+```
+
+`HG002.threads.tsv` maps every set ID to named haplotypes:
+
+```
+set_id  thread_id  path_id  sample   haplotype  locus         path_name
+4       54312      54312    GRCh38   0          chr9          GRCh38#0#chr9[68220832]
+4       54372      54372    HG00140  1          CM087114.1    HG00140#1#CM087114.1#59589124
+7       61204      61204    HG00513  2          CM088003.1    HG00513#2#CM088003.1#71304981
+```
+
+Each row is one haplotype thread that passes through the graph subpath a read was aligned to. Joining on `hs` from the BAM to `set_id` in this TSV gives you the full haplotype identity for every read.
+
+---
+
 ## Dependencies
 
 ### Required
@@ -88,7 +160,7 @@ The install step automatically copies all non-system runtime libraries into `lib
 
 Annotate a BAM file with graph thread information.
 
-> **GAM input:** pgbam accepts GAF only. If your aligner produced a GAM file (vg's binary protobuf format), convert it first using the GBZ that was used for alignment:
+> **GAM input:** pgbam accepts GAF only. If your aligner produced a GAM file (vg's binary protobuf format), convert it first:
 > ```bash
 > vg convert -G alignments.gam graph.gbz > alignments.gaf
 > ```
@@ -96,14 +168,14 @@ Annotate a BAM file with graph thread information.
 
 ```
 pgbam annotate
-    --bam     <in.bam>
-    --gaf     <in.gaf>
-    --out-bam <out.bam>
+    --bam      <in.bam>
+    --gaf      <in.gaf>
+    --out-bam  <out.bam>
     --out-sets <out.pgbam>
-  ( --gbz   <graph.gbz>
-  | --gbwt  <graph.gbwt> )
-  [ --r-index  <graph.ri> ]
-  [ --threads  <N> ]
+  ( --gbz    <graph.gbz>
+  | --gbwt   <graph.gbwt> )
+  [ --r-index <graph.ri> ]
+  [ --threads <N> ]
   [ --primary-only ]
 ```
 
@@ -115,7 +187,7 @@ pgbam annotate
 | `--out-sets` | yes | Output sidecar metadata file (`.pgbam`) |
 | `--gbz` | one of | GBZ graph index |
 | `--gbwt` | one of | GBWT graph index |
-| `--r-index` | no | R-index (`.ri`) for the GBWT — enables faster locate queries; build with `gbwt` tools |
+| `--r-index` | no | R-index (`.ri`) for the GBWT — enables faster locate queries |
 | `--threads` | no | Worker threads (default: 1) |
 | `--primary-only` | no | Use only the first GAF alignment in each `qname` block; annotate every BAM record with that `qname` from that primary alignment's set |
 
