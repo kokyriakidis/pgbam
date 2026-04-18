@@ -61,6 +61,8 @@ he:B:I,391,520 <- end offset (exclusive) for each match
 
 `hs` indexes into `HG002.pgbam`. A read with a single `hs` entry maps entirely within one group of haplotype paths; multiple entries mean the read spans graph regions where different haplotypes diverge.
 
+`HG002.pgbam` stores, for each set ID, the list of haplotype thread IDs that pass through that subpath — as compact integers, not human-readable names. For the example read above, set ID `4` might resolve to a dozen HPRC haplotypes, and set ID `7` to a different subset. The sidecar keeps the BAM lean; decoding is done on demand with `pgbam decode`.
+
 **Step 4 — Decode to TSV:**
 
 ```bash
