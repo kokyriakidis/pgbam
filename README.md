@@ -76,7 +76,30 @@ he:B:I,391,520 <- end offset (exclusive) for each match
 
 `HG002.pgbam` stores, for each set ID, the list of haplotype thread IDs that pass through that subpath — as compact integers, not human-readable names. For the example read above, set ID `4` might resolve to a dozen HPRC haplotypes, and set ID `7` to a different subset. The sidecar keeps the BAM lean; decoding is done on demand with `pgbam decode`.
 
-**Step 4 — Decode to TSV:**
+**Step 4 — Re-sort and index for region queries** (optional):
+
+`pgbam annotate` outputs reads in qname order. To query by genomic region, coordinate-sort and index the annotated BAM:
+
+```bash
+samtools sort -@ 8 -o HG002.annotated.coord.bam HG002.annotated.bam
+samtools index HG002.annotated.coord.bam
+```
+
+You can then extract reads from any region and work with their `hs` tags directly:
+
+```bash
+samtools view HG002.annotated.coord.bam chr9:68000000-69000000
+```
+
+Once you have a set of reads from a region, the `hs` values are small integers — cheap to group, compare, and look up in the decoded TSV. Typical operations:
+
+- **Union** — which haplotypes are present at all in a region: collect every `hs` value across all reads and resolve them via the TSV.
+- **Intersection** — which haplotypes are shared by every read: intersect the thread sets for each `hs` value.
+- **Difference** — haplotypes private to one group of reads vs another: set difference between the resolved thread sets.
+
+Because identical subpath matches share the same set ID, reads that traverse the same graph region carry the same `hs` value rather than redundant per-read thread lists. The GBWT locate work is done once at annotation time and never repeated.
+
+**Step 5 — Decode to TSV** (optional):
 
 ```bash
 pgbam decode \
