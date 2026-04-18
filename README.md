@@ -193,6 +193,10 @@ pgbam annotate
 
 The r-index accelerates the locate step — recovering which haplotype paths pass through each aligned subpath. For large cohorts or deeply sequenced samples, supplying it meaningfully reduces runtime.
 
+**GBZ vs GBWT:**
+
+Both formats give identical annotation results. The difference is load time and memory: a `.gbwt` contains only the haplotype index, while a `.gbz` bundles the GBWT together with the full graph (node sequences and topology). pgbam only needs the haplotype index, so if you have both files available, prefer `--gbwt` — it loads faster and uses less RAM.
+
 **Memory model:**
 
 - The BAM and GAF inputs are streamed during annotation.
