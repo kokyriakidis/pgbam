@@ -164,11 +164,13 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-The `pgbam` binary is at `build/pgbam`.
+The `pgbam` binary is at `build/pgbam`. If you only want to run the tool locally, this is all you need — installing is optional.
 
 ---
 
 ## Installing
+
+Installing is only necessary if you want to put `pgbam` on your `PATH`, distribute it to a machine without the build dependencies, or use it as a library in another CMake project. The install step bundles all runtime dependencies (htslib, zstd) alongside the binary so the result is self-contained.
 
 ```bash
 cmake --install build --prefix /path/to/install
@@ -186,7 +188,7 @@ This installs:
   lib/cmake/pgbam/
 ```
 
-The install step automatically copies all non-system runtime libraries into `lib/` and rewrites their load paths so the installation is self-contained — no Homebrew, conda, or package manager prefix needs to be present on the target machine.
+Runtime libraries are copied into `lib/` and their load paths are rewritten — no Homebrew, conda, or package manager prefix needs to be present on the target machine.
 
 **Linux note:** `patchelf` is required for the bundling step. If it is not on `PATH`, it is automatically built from source during `cmake --build` and used transparently — no manual install needed.
 
