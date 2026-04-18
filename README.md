@@ -11,6 +11,19 @@ The typical workflow is:
 
 ---
 
+## Contents
+
+- [End-to-end example](#end-to-end-example)
+- [Dependencies](#dependencies)
+- [Building](#building)
+- [Installing](#installing)
+- [Usage](#usage)
+  - [`pgbam annotate`](#pgbam-annotate)
+  - [`pgbam decode`](#pgbam-decode)
+- [Using pgbam as a library](#using-pgbam-as-a-library)
+
+---
+
 ## End-to-end example
 
 **Scenario:** HiFi reads from sample HG002 aligned to the HPRC pangenome graph with `vg giraffe`. The goal is to annotate each read with the donor haplotypes it is most consistent with, and export a TSV mapping those annotations to named samples.
