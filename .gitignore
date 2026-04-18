@@ -47,3 +47,24 @@
 # Tags
 tags
 TAGS
+
+# Bioinformatics data files
+*.bam
+*.bai
+*.cram
+*.crai
+*.gaf
+*.gam
+*.gbwt
+*.gbz
+*.ri
+*.pgbam
+*.vcf
+*.vcf.gz
+*.bcf
+*.fasta
+*.fa
+*.fastq
+*.fq
+*.fq.gz
+*.fastq.gz

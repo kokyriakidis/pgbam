@@ -28,6 +28,34 @@
 namespace pgbam {
 namespace {
 
+// Natural-sort comparison matching htslib/samtools strnum_cmp used by
+// `samtools sort -n`.  Digit runs are compared numerically so that e.g.
+// "read/9/ccs" < "read/10/ccs" rather than the other way around.
+bool qname_less(std::string_view a, std::string_view b) {
+  std::size_t i = 0, j = 0;
+  while (i < a.size() && j < b.size()) {
+    if (std::isdigit(static_cast<unsigned char>(a[i])) &&
+        std::isdigit(static_cast<unsigned char>(b[j]))) {
+      while (i < a.size() && a[i] == '0') ++i;
+      while (j < b.size() && b[j] == '0') ++j;
+      std::size_t ia = i, jb = j;
+      while (ia < a.size() && std::isdigit(static_cast<unsigned char>(a[ia]))) ++ia;
+      while (jb < b.size() && std::isdigit(static_cast<unsigned char>(b[jb]))) ++jb;
+      std::size_t alen = ia - i, blen = jb - j;
+      if (alen != blen) return alen < blen;
+      while (i < ia) {
+        if (a[i] != b[j]) return a[i] < b[j];
+        ++i; ++j;
+      }
+      i = ia; j = jb;
+    } else {
+      if (a[i] != b[j]) return static_cast<unsigned char>(a[i]) < static_cast<unsigned char>(b[j]);
+      ++i; ++j;
+    }
+  }
+  return i == a.size() && j < b.size();
+}
+
 using SamFilePtr = std::unique_ptr<samFile, decltype(&hts_close)>;
 using SamHeaderPtr = std::unique_ptr<sam_hdr_t, decltype(&sam_hdr_destroy)>;
 
@@ -269,7 +297,7 @@ void ensure_gaf_order(const AnnotateOptions& options) {
     if (!record) {
       continue;
     }
-    if (!previous_qname.empty() && previous_qname > record->qname) {
+    if (!previous_qname.empty() && qname_less(record->qname, previous_qname)) {
       throw Error(make_gaf_qname_order_error(path, previous_qname, previous_line, record->qname, line_number));
     }
     if (options.primary_only && previous_qname == record->qname && previous_mapq < record->mapq) {
@@ -298,7 +326,7 @@ void ensure_bam_qname_sorted(const std::string& path, std::size_t threads) {
     }
     ++record_number;
     const std::string_view qname = bam_get_qname(record.get());
-    if (!previous.empty() && previous > qname) {
+    if (!previous.empty() && qname_less(qname, previous)) {
       throw Error(make_bam_qname_order_error(path, previous, previous_record, qname, record_number));
     }
     previous.assign(qname.data(), qname.size());
@@ -614,7 +642,7 @@ void run_sorted_join(const AnnotateOptions& options,
       return;
     }
     ++gaf_record_number;
-    if (!previous_gaf_qname.empty() && current_gaf->qname < previous_gaf_qname) {
+    if (!previous_gaf_qname.empty() && qname_less(current_gaf->qname, previous_gaf_qname)) {
       throw Error(make_gaf_qname_order_error(options.gaf_path,
                                              previous_gaf_qname,
                                              previous_gaf_record,
@@ -661,7 +689,7 @@ void run_sorted_join(const AnnotateOptions& options,
   annotate_stream(input.get(), input_header.get(), options.bam_path, output.get(), output_header.get(),
                   graph, options.threads, interner,
                   [&](std::string_view qname, std::size_t first_record_number, WorkItem& item) {
-                    if (!previous_bam_qname.empty() && previous_bam_qname > qname) {
+                    if (!previous_bam_qname.empty() && qname_less(qname, previous_bam_qname)) {
                       throw Error(make_bam_qname_order_error(options.bam_path,
                                                              previous_bam_qname,
                                                              previous_bam_record,
@@ -671,7 +699,7 @@ void run_sorted_join(const AnnotateOptions& options,
                     previous_bam_qname.assign(qname.data(), qname.size());
                     previous_bam_record = first_record_number;
 
-                    while (current_gaf && current_gaf->qname < qname) {
+                    while (current_gaf && qname_less(current_gaf->qname, qname)) {
                       advance_gaf();
                     }
 

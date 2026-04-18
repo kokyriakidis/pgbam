@@ -88,10 +88,11 @@ The install step automatically copies all non-system runtime libraries into `lib
 
 Annotate a BAM file with graph thread information.
 
-> **GAM input:** pgbam accepts GAF only. If your aligner produced a GAM file (vg's binary protobuf format), convert it first:
+> **GAM input:** pgbam accepts GAF only. If your aligner produced a GAM file (vg's binary protobuf format), convert it first using the GBZ that was used for alignment:
 > ```bash
-> vg convert -G alignments.gam > alignments.gaf
+> vg convert -G alignments.gam graph.gbz > alignments.gaf
 > ```
+> The GBZ is required — `vg convert` needs the graph to compute target lengths and resolve node sequences for the GAF records.
 
 ```
 pgbam annotate
@@ -131,7 +132,7 @@ The r-index accelerates the locate step — recovering which haplotype paths pas
 
 - `pgbam annotate` requires both BAM and GAF to be non-decreasing by `qname`.
 - Sort BAM by query name with `samtools sort -n -o reads.qname.bam reads.bam`.
-- Sort GAF by `qname` and then decreasing MAPQ with `sort -k1,1 -k12,12nr reads.gaf > reads.qname.mapq.gaf`.
+- Sort GAF by `qname` and then decreasing MAPQ with `sort -k1,1V -k12,12nr reads.gaf > reads.qname.mapq.gaf`.
 - This ordering is recommended in general and is required for `--primary-only`, because `pgbam` uses the first GAF alignment in each `qname` block as the primary one.
 - Sorting by `qname` groups identical names together, but it does not create a reliable per-record order within a duplicate-name block.
 - By default, `pgbam` aggregates all GAF alignments in a `qname` block, combines their graph matches, and applies the same aggregated annotation to every BAM record in the matching `qname` block.

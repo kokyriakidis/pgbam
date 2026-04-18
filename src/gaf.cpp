@@ -80,6 +80,9 @@ std::optional<GafRecord> parse_gaf_line(const std::string& line) {
   record.query_length = parse_u64(fields[1], "query_length");
   record.query_start = parse_u64(fields[2], "query_start");
   record.query_end = parse_u64(fields[3], "query_end");
+  if (fields[4].size() == 1 && fields[4][0] == '*') {
+    return std::nullopt;
+  }
   if (fields[4].size() != 1 || (fields[4][0] != '+' && fields[4][0] != '-')) {
     throw Error("invalid GAF strand field in line: " + line);
   }
